@@ -7,26 +7,44 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 # DB models and session
-from database.models import (
-    create_tables,
-    get_db,
-    Sow,
-    WeeklyRecord,
-)
 from sqlalchemy.orm import Session
 
-# AI model (Gemini)
-import google.generativeai as genai
+# Try to import local database package; fall back gracefully if missing in deploy repo
+HAS_DB = True
+try:
+    from database.models import (
+        create_tables,
+        get_db,
+        Sow,
+        WeeklyRecord,
+    )
+except Exception:
+    HAS_DB = False
+
+    def create_tables():
+        return None
+
+    def get_db():
+        # Fallback dependency yielding None when DB package is unavailable
+        yield None
+
+    Sow = None  # type: ignore
+    WeeklyRecord = None  # type: ignore
+
+# AI model (Gemini) — імпорт без падіння, якщо пакету немає
+try:
+    import google.generativeai as genai  # type: ignore
+except Exception:
+    genai = None  # пакету немає — чат буде вимкнено, але сервіс не впаде
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if GEMINI_API_KEY:
+_ai_model = None
+if genai and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
         _ai_model = genai.GenerativeModel('gemini-pro')
     except Exception:
         _ai_model = None
-else:
-    _ai_model = None
 
 app = FastAPI(title="Farm AI Chat", version="2.0")
 
@@ -366,9 +384,17 @@ def chat_with_ai(req: ChatRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="AI недоступний. Перевірте GEMINI_API_KEY")
 
     # Контекст з БД: останні 8 тижнів + статистика свиноматок
-    recent = db.query(WeeklyRecord).order_by(WeeklyRecord.week_start_date.desc()).limit(8).all()
-    active = db.query(Sow).filter(Sow.status == "активна").count()
-    total = db.query(Sow).count()
+    recent = []
+    active = 0
+    total = 0
+    if HAS_DB and db is not None:
+        try:
+            recent = db.query(WeeklyRecord).order_by(WeeklyRecord.week_start_date.desc()).limit(8).all()
+            active = db.query(Sow).filter(Sow.status == "активна").count()
+            total = db.query(Sow).count()
+        except Exception:
+            # If any DB error happens, proceed with empty context
+            recent, active, total = [], 0, 0
 
     context = ""
     if req.include_context:
