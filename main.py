@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import os
 
 app = FastAPI(title="Farm AI Chat", version="2.0")
 
@@ -12,8 +13,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files (icons, images) for PWA
-app.mount("/static", StaticFiles(directory="backend/static"), name="static")
+# Serve static files (icons, images) for PWA; tolerate missing directory in repo
+static_dir = "backend/static"
+try:
+    if os.path.isdir(static_dir):
+        app.mount("/static", StaticFiles(directory=static_dir), name="static")
+except Exception:
+    # Ignore static mount issues to prevent startup failure on Render
+    pass
 
 
 @app.get("/")
@@ -131,10 +138,12 @@ def root():
     </script>
 </body>
 </html>""")
-    @app.head("/")
-    def root_head():
-        """Handle HEAD / to avoid 405 in platform health checks."""
-        return Response(status_code=200)
+
+
+@app.head("/")
+def root_head():
+    """Handle HEAD / to avoid 405 in platform health checks."""
+    return Response(status_code=200)
 
 
 @app.get("/health")
