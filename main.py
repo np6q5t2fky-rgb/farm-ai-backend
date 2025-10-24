@@ -1,8 +1,32 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
 from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
+from pydantic import BaseModel, Field
+from typing import Optional
+
+# DB models and session
+from database.models import (
+    create_tables,
+    get_db,
+    Sow,
+    WeeklyRecord,
+)
+from sqlalchemy.orm import Session
+
+# AI model (Gemini)
+import google.generativeai as genai
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        _ai_model = genai.GenerativeModel('gemini-pro')
+    except Exception:
+        _ai_model = None
+else:
+    _ai_model = None
 
 app = FastAPI(title="Farm AI Chat", version="2.0")
 
@@ -43,7 +67,7 @@ def root():
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             color: white; font-family: Arial; min-height: 100vh;
         }
-        .container { max-width: 600px; margin: 0 auto; text-align: center; }
+        .container { max-width: 900px; margin: 0 auto; }
         .card { 
             background: rgba(255,255,255,0.1); padding: 30px; 
             border-radius: 20px; margin: 20px 0; backdrop-filter: blur(10px);
@@ -57,6 +81,19 @@ def root():
         .btn { background:#111827; color:white; border:1px solid #374151; padding:10px 16px; border-radius:10px; cursor:pointer; }
         .btn.primary { background:#2563eb; border-color:#1d4ed8; }
         .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.75); color: #fff; padding: 10px 14px; border-radius: 8px; font-size: 14px; display:none; }
+
+        /* Chat */
+        .chat { display:flex; gap:16px; }
+        .chat-col { flex:1; min-width: 280px; }
+        .messages { height: 360px; overflow:auto; padding:12px; background: rgba(255,255,255,0.08); border-radius:12px; }
+        .msg { margin: 8px 0; padding: 10px 12px; border-radius: 10px; line-height: 1.4; }
+        .msg.user { background:#2563eb; color:#fff; border-top-right-radius: 4px; }
+        .msg.ai { background:#111827; color:#e5e7eb; border-top-left-radius: 4px; }
+        .msg small { display:block; opacity:0.7; margin-top:6px; font-size: 12px; }
+        .row { display:flex; gap:8px; margin-top:10px; }
+        .row input { flex:1; padding:10px 12px; border-radius:8px; border:1px solid #374151; background:#0b1220; color:#fff; }
+        .row button { padding:10px 14px; border-radius:8px; border:1px solid #374151; background:#2563eb; color:#fff; cursor:pointer; }
+        .hint { font-size: 13px; opacity: 0.85; }
     </style>
     <link rel="preload" href="/sw.js" as="script" crossorigin>
     <meta http-equiv="Cache-Control" content="no-store" />
@@ -65,21 +102,26 @@ def root():
 </head>
 <body>
     <div class="container">
-        <div class="card">
+        <div class="card" style="text-align:center">
             <h1>🐷 Farm AI Chat</h1>
             <p>Система обліку свиноферми</p>
-            
-            <div class="status">
-                ✅ ВИПРАВЛЕНО ЧОРНИЙ ЕКРАН!
-            </div>
-            
-            <p>🎉 Тепер працює HTML інтерфейс</p>
-            <p>📱 Відкривається на мобільному</p>
-            <p>🚀 Деплой успішний!</p>
-
-            <div class="actions">
+            <div class="actions" style="justify-content:center">
                 <button id="installBtn" class="btn primary" style="display:none">⬇️ Встановити як додаток</button>
                 <button id="refreshBtn" class="btn">🔄 Оновити</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>Чат з AI</h3>
+            <div class="chat">
+                <div class="chat-col">
+                    <div id="messages" class="messages"></div>
+                    <div class="row">
+                        <input id="input" placeholder="Напишіть питання…" />
+                        <button id="send">Надіслати</button>
+                    </div>
+                    <div class="hint">Порада: напишіть "Підсумуй останні 4 тижні" або "Яка виживаність і що покращити?"</div>
+                </div>
             </div>
         </div>
     </div>
@@ -135,6 +177,56 @@ def root():
         });
 
         document.getElementById('refreshBtn').addEventListener('click', () => window.location.reload());
+
+        // Chat logic
+        const elMsgs = document.getElementById('messages');
+        const elInput = document.getElementById('input');
+        const elSend = document.getElementById('send');
+        const history = JSON.parse(localStorage.getItem('farm_chat_hist')||'[]');
+
+        function render(){
+            elMsgs.innerHTML = history.map(m => `
+                <div class="msg ${m.role}">${m.text.replace(/</g,'&lt;').replace(/\n/g,'<br>')}
+                    <small>${new Date(m.time).toLocaleString()}</small>
+                </div>`).join('');
+            elMsgs.scrollTop = elMsgs.scrollHeight;
+        }
+        render();
+
+        function push(role, text){
+            history.push({role, text, time: Date.now()});
+            if(history.length>50) history.shift();
+            localStorage.setItem('farm_chat_hist', JSON.stringify(history));
+            render();
+        }
+
+        async function send(){
+            const msg = elInput.value.trim();
+            if(!msg) return;
+            elInput.value = '';
+            push('user', msg);
+            const typingId = `typing_${Date.now()}`;
+            elMsgs.insertAdjacentHTML('beforeend', `<div id="${typingId}" class="msg ai">Думаю…</div>`);
+            elMsgs.scrollTop = elMsgs.scrollHeight;
+            try{
+                const res = await fetch('/api/chat', {
+                    method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({message: msg, include_context: true})
+                });
+                if(!res.ok){
+                    const err = await res.json().catch(()=>({detail: res.statusText}));
+                    throw new Error(err.detail||'Помилка сервера');
+                }
+                const data = await res.json();
+                document.getElementById(typingId)?.remove();
+                push('ai', data.response || 'Немає відповіді');
+            }catch(e){
+                document.getElementById(typingId)?.remove();
+                push('ai', `❌ ${e.message}`);
+            }
+        }
+        elSend.addEventListener('click', send);
+        elInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter') send(); });
     </script>
 </body>
 </html>""")
@@ -260,6 +352,57 @@ def service_worker():
         });
     """
     return Response(content=sw_code, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
+
+
+# ===================== API: Chat =====================
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    include_context: Optional[bool] = True
+
+
+@app.post("/api/chat")
+def chat_with_ai(req: ChatRequest, db: Session = Depends(get_db)):
+    if not _ai_model:
+        raise HTTPException(status_code=503, detail="AI недоступний. Перевірте GEMINI_API_KEY")
+
+    # Контекст з БД: останні 8 тижнів + статистика свиноматок
+    recent = db.query(WeeklyRecord).order_by(WeeklyRecord.week_start_date.desc()).limit(8).all()
+    active = db.query(Sow).filter(Sow.status == "активна").count()
+    total = db.query(Sow).count()
+
+    context = ""
+    if req.include_context:
+        context = (
+            f"Свиноматки: всього {total}, активних {active}.\n"
+            f"Останні тижні:\n" +
+            "\n".join([
+                f"- {r.week_start_date}: {r.farrowings} опоросів, виживаність {r.survival_rate:.1f}%"
+                for r in recent
+            ])
+        )
+
+    system_prompt = (
+        "Ти — AI асистент для свиноферми. Аналізуй дані та відповідай українською,"
+        " будь конкретним і корисним. Якщо даних бракує — проси уточнення."
+    )
+
+    full_prompt = f"{system_prompt}\n\n{context}\n\nПитання: {req.message}"
+    try:
+        resp = _ai_model.generate_content(full_prompt)
+        text = getattr(resp, 'text', None) or "(порожня відповідь)"
+        return {"response": text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Помилка AI: {str(e)}")
+
+
+# ===================== Startup: ensure tables =====================
+@app.on_event("startup")
+def _on_startup():
+    try:
+        create_tables()
+    except Exception:
+        # Не блокуємо старт, якщо немає прав/БД — чат без контексту все одно можливий
+        pass
 
 
 if __name__ == "__main__":
