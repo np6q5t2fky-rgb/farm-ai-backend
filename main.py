@@ -1,5 +1,9 @@
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import HTMLResponse, Response
+from fastapi.responses import HTMLResponse, Response, FileResponse
+from fastapi import UploadFile, File
+import shutil
+import pandas as pd
+import json
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
@@ -42,7 +46,123 @@ _ai_model = None
 if genai and GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        _ai_model = genai.GenerativeModel('gemini-pro')
+        # Use a model name that is available for your API key
+        # You can list available models with genai.list_models()
+        # Common options: 'gemini-pro-vision', 'gemini-1.0-pro', etc.
+        # If unsure, use 'gemini-1.0-pro' (text only)
+        _ai_model = genai.GenerativeModel('gemini-1.0-pro')
+    except Exception:
+        _ai_model = None
+
+app = FastAPI(title="Farm AI Chat", version="2.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# In-memory memory for important messages
+AI_MEMORY = []
+# Store uploaded Excel file path
+EXCEL_FILE_PATH = "farm_data.xlsx"
+
+class MemoryMessage(BaseModel):
+    text: str
+    role: str = "user"
+
+@app.post("/api/upload-excel")
+async def upload_excel(file: UploadFile = File(...)):
+    save_path = EXCEL_FILE_PATH
+    with open(save_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+    return {"status": "ok", "filename": save_path}
+
+@app.get("/api/table")
+def get_table():
+    if not os.path.exists(EXCEL_FILE_PATH):
+        return {"error": "No Excel file uploaded yet."}
+    df = pd.read_excel(EXCEL_FILE_PATH)
+    return json.loads(df.to_json(orient="records", date_format="iso"))
+
+@app.post("/api/save-memory")
+def save_memory(msg: MemoryMessage):
+    AI_MEMORY.append(msg.dict())
+    return {"status": "saved", "count": len(AI_MEMORY)}
+
+@app.get("/api/memory")
+def get_memory():
+    return AI_MEMORY
+
+@app.get("/api/report")
+def get_report():
+    if not os.path.exists(EXCEL_FILE_PATH):
+        raise HTTPException(404, "No Excel file uploaded.")
+    return FileResponse(EXCEL_FILE_PATH, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename="farm_report.xlsx")
+
+@app.post("/api/chat")
+def chat_with_ai(req: BaseModel = None):
+    user_msg = req.message if req and hasattr(req, "message") else ""
+    context = ""
+    if AI_MEMORY:
+        context += "\n".join([f"{m['role']}: {m['text']}" for m in AI_MEMORY]) + "\n"
+    if os.path.exists(EXCEL_FILE_PATH):
+        try:
+            df = pd.read_excel(EXCEL_FILE_PATH)
+            context += f"Таблиця ферми (останні 5 рядків):\n" + df.tail(5).to_string(index=False) + "\n"
+        except Exception:
+            context += "[Excel не вдалося прочитати]"
+    prompt = f"{context}\nКористувач: {user_msg}"
+    reply = f"[AI] Ваша таблиця має {df.shape[0] if 'df' in locals() else 0} рядків. Ваше питання: {user_msg}"
+    return {"response": reply}
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
+from pydantic import BaseModel, Field
+from typing import Optional
+
+# DB models and session
+from sqlalchemy.orm import Session
+
+# Try to import local database package; fall back gracefully if missing in deploy repo
+HAS_DB = True
+try:
+    from database.models import (
+        create_tables,
+        get_db,
+        Sow,
+        WeeklyRecord,
+    )
+except Exception:
+    HAS_DB = False
+
+    def create_tables():
+        return None
+
+    def get_db():
+        # Fallback dependency yielding None when DB package is unavailable
+        yield None
+
+    Sow = None  # type: ignore
+    WeeklyRecord = None  # type: ignore
+
+# AI model (Gemini) — імпорт без падіння, якщо пакету немає
+try:
+    import google.generativeai as genai  # type: ignore
+except Exception:
+    genai = None  # пакету немає — чат буде вимкнено, але сервіс не впаде
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+_ai_model = None
+if genai and GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        # Use a model name that is available for your API key
+        # You can list available models with genai.list_models()
+        # Common options: 'gemini-pro-vision', 'gemini-1.0-pro', etc.
+        # If unsure, use 'gemini-1.0-pro' (text only)
+        _ai_model = genai.GenerativeModel('gemini-1.0-pro')
     except Exception:
         _ai_model = None
 
@@ -77,20 +197,34 @@ def root():
     <meta name="theme-color" content="#667eea">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Farm AI">
+    <meta name="description" content="Система обліку свиноферми з AI чатом">
     <link rel="manifest" href="/manifest.json">
-    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+    <link rel="apple-touch-icon" sizes="192x192" href="/static/icons/icon-192.png">
+    <link rel="apple-touch-icon" sizes="512x512" href="/static/icons/icon-512.png">
     <style>
-        body { 
-            margin: 0; padding: 20px; 
+        body {
+            margin: 0; padding: 0;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; font-family: Arial; min-height: 100vh;
+            color: white; font-family: Arial, sans-serif; min-height: 100vh;
+            -webkit-touch-callout: none;
+            -webkit-user-select: none;
+            user-select: none;
+            overscroll-behavior: contain;
         }
-        .container { max-width: 900px; margin: 0 auto; }
-        .card { 
-            background: rgba(255,255,255,0.1); padding: 30px; 
+    .container { max-width: 900px; margin: 0 auto; padding: 20px; }
+        .card {
+            background: rgba(255,255,255,0.1); padding: 30px;
             border-radius: 20px; margin: 20px 0; backdrop-filter: blur(10px);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.18);
         }
         h1 { font-size: 2.5em; margin-bottom: 10px; }
+        @media (max-width: 600px) {
+            .container { max-width: 100vw; padding: 8px; }
+            .card { padding: 16px; border-radius: 12px; }
+            h1 { font-size: 1.5em; }
+        }
         .status { 
             background: rgba(0,255,0,0.2); padding: 15px; 
             border-radius: 10px; margin: 20px 0; font-size: 1.2em;
@@ -419,6 +553,18 @@ def chat_with_ai(req: ChatRequest, db: Session = Depends(get_db)):
         return {"response": text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Помилка AI: {str(e)}")
+
+
+@app.get("/api/ai-status")
+def ai_status():
+    """Проста перевірка стану AI без виклику моделі (безкоштовно)."""
+    status = {
+        "has_package": bool(genai is not None),
+        "has_key": bool(GEMINI_API_KEY),
+        "configured": bool(_ai_model is not None),
+        "model": getattr(_ai_model, "model_name", None) if _ai_model else None,
+    }
+    return status
 
 
 # ===================== Startup: ensure tables =====================
