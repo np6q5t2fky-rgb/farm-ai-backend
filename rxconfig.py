@@ -1,7 +1,7 @@
 import reflex as rx
 
 config = rx.Config(
-    app_name="frontend.app",
+    app_name="frontend",
     db_url=None,
     plugins=[],
 )
