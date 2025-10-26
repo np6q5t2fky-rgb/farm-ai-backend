@@ -708,7 +708,7 @@ def chat_panel() -> rx.Component:
 def excel_upload_modal() -> rx.Component:
     return rx.cond(
         FarmState.show_excel_upload,
-        rx.modal(
+    rx.dialog(
             rx.vstack(
                 rx.heading("Завантажити Excel файл", size="5"),
                 rx.input(type="file", accept=".xlsx", on_change=FarmState.upload_excel),
