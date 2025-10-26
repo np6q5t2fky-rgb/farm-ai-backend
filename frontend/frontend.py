@@ -523,7 +523,7 @@ def sows_page() -> rx.Component:
                                 rx.text(f"Народження: {sow['birth_date']}", size="2"),
                                 rx.badge(
                                     sow["status"],
-                                    color_scheme="green" if sow["status"] == "активна" else "gray",
+                                    color_scheme=rx.cond(sow["status"] == "активна", "green", "gray"),
                                 ),
                                 spacing="1",
                             ),
