@@ -1,58 +1,6 @@
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import HTMLResponse, Response, FileResponse
-from fastapi import UploadFile, File
-import shutil
-import pandas as pd
-import json
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import os
-from pydantic import BaseModel, Field
-from typing import Optional
-
-# DB models and session
-from sqlalchemy.orm import Session
-
-# Try to import local database package; fall back gracefully if missing in deploy repo
-HAS_DB = True
-try:
-    from database.models import (
-        create_tables,
-        get_db,
-        Sow,
-        WeeklyRecord,
-    )
-except Exception:
-    HAS_DB = False
-
-    def create_tables():
-        return None
-
-    def get_db():
-        # Fallback dependency yielding None when DB package is unavailable
-        yield None
-
-    Sow = None  # type: ignore
-    WeeklyRecord = None  # type: ignore
-
-# AI model (Gemini) — імпорт без падіння, якщо пакету немає
-try:
-    import google.generativeai as genai  # type: ignore
-except Exception:
-    genai = None  # пакету немає — чат буде вимкнено, але сервіс не впаде
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-_ai_model = None
-if genai and GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        # Use a model name that is available for your API key
-        # You can list available models with genai.list_models()
-        # Common options: 'gemini-pro-vision', 'gemini-1.0-pro', etc.
-        # If unsure, use 'gemini-1.0-pro' (text only)
-        _ai_model = genai.GenerativeModel('gemini-1.0-pro')
-    except Exception:
-        _ai_model = None
 
 app = FastAPI(title="Farm AI Chat", version="2.0")
 
@@ -62,128 +10,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# In-memory memory for important messages
-AI_MEMORY = []
-# Store uploaded Excel file path
-EXCEL_FILE_PATH = "farm_data.xlsx"
-
-class MemoryMessage(BaseModel):
-    text: str
-    role: str = "user"
-
-@app.post("/api/upload-excel")
-async def upload_excel(file: UploadFile = File(...)):
-    save_path = EXCEL_FILE_PATH
-    with open(save_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    return {"status": "ok", "filename": save_path}
-
-@app.get("/api/table")
-def get_table():
-    if not os.path.exists(EXCEL_FILE_PATH):
-        return {"error": "No Excel file uploaded yet."}
-    df = pd.read_excel(EXCEL_FILE_PATH)
-    return json.loads(df.to_json(orient="records", date_format="iso"))
-
-@app.post("/api/save-memory")
-def save_memory(msg: MemoryMessage):
-    AI_MEMORY.append(msg.dict())
-    return {"status": "saved", "count": len(AI_MEMORY)}
-
-@app.get("/api/memory")
-def get_memory():
-    return AI_MEMORY
-
-@app.get("/api/report")
-def get_report():
-    if not os.path.exists(EXCEL_FILE_PATH):
-        raise HTTPException(404, "No Excel file uploaded.")
-    return FileResponse(EXCEL_FILE_PATH, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename="farm_report.xlsx")
-
-@app.post("/api/chat")
-def chat_with_ai(req: BaseModel = None):
-    user_msg = req.message if req and hasattr(req, "message") else ""
-    context = ""
-    if AI_MEMORY:
-        context += "\n".join([f"{m['role']}: {m['text']}" for m in AI_MEMORY]) + "\n"
-    if os.path.exists(EXCEL_FILE_PATH):
-        try:
-            df = pd.read_excel(EXCEL_FILE_PATH)
-            context += f"Таблиця ферми (останні 5 рядків):\n" + df.tail(5).to_string(index=False) + "\n"
-        except Exception:
-            context += "[Excel не вдалося прочитати]"
-    prompt = f"{context}\nКористувач: {user_msg}"
-    reply = f"[AI] Ваша таблиця має {df.shape[0] if 'df' in locals() else 0} рядків. Ваше питання: {user_msg}"
-    return {"response": reply}
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-import os
-from pydantic import BaseModel, Field
-from typing import Optional
-
-# DB models and session
-from sqlalchemy.orm import Session
-
-# Try to import local database package; fall back gracefully if missing in deploy repo
-HAS_DB = True
-try:
-    from database.models import (
-        create_tables,
-        get_db,
-        Sow,
-        WeeklyRecord,
-    )
-except Exception:
-    HAS_DB = False
-
-    def create_tables():
-        return None
-
-    def get_db():
-        # Fallback dependency yielding None when DB package is unavailable
-        yield None
-
-    Sow = None  # type: ignore
-    WeeklyRecord = None  # type: ignore
-
-# AI model (Gemini) — імпорт без падіння, якщо пакету немає
-try:
-    import google.generativeai as genai  # type: ignore
-except Exception:
-    genai = None  # пакету немає — чат буде вимкнено, але сервіс не впаде
-
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-_ai_model = None
-if genai and GEMINI_API_KEY:
-    try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        # Use a model name that is available for your API key
-        # You can list available models with genai.list_models()
-        # Common options: 'gemini-pro-vision', 'gemini-1.0-pro', etc.
-        # If unsure, use 'gemini-1.0-pro' (text only)
-        _ai_model = genai.GenerativeModel('gemini-1.0-pro')
-    except Exception:
-        _ai_model = None
-
-app = FastAPI(title="Farm AI Chat", version="2.0")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Serve static files (icons, images) for PWA; tolerate missing directory in repo
-static_dir = "backend/static"
-try:
-    if os.path.isdir(static_dir):
-        app.mount("/static", StaticFiles(directory=static_dir), name="static")
-except Exception:
-    # Ignore static mount issues to prevent startup failure on Render
-    pass
-
 
 @app.get("/")
 def root():
@@ -197,34 +23,20 @@ def root():
     <meta name="theme-color" content="#667eea">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <meta name="mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-title" content="Farm AI">
-    <meta name="description" content="Система обліку свиноферми з AI чатом">
     <link rel="manifest" href="/manifest.json">
-    <link rel="apple-touch-icon" sizes="192x192" href="/static/icons/icon-192.png">
-    <link rel="apple-touch-icon" sizes="512x512" href="/static/icons/icon-512.png">
+    <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
     <style>
-        body {
-            margin: 0; padding: 0;
+        body { 
+            margin: 0; padding: 20px; 
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white; font-family: Arial, sans-serif; min-height: 100vh;
-            -webkit-touch-callout: none;
-            -webkit-user-select: none;
-            user-select: none;
-            overscroll-behavior: contain;
+            color: white; font-family: Arial; min-height: 100vh;
         }
-    .container { max-width: 900px; margin: 0 auto; padding: 20px; }
-        .card {
-            background: rgba(255,255,255,0.1); padding: 30px;
+        .container { max-width: 600px; margin: 0 auto; text-align: center; }
+        .card { 
+            background: rgba(255,255,255,0.1); padding: 30px; 
             border-radius: 20px; margin: 20px 0; backdrop-filter: blur(10px);
-            box-shadow: 0 8px 32px rgba(0,0,0,0.18);
         }
         h1 { font-size: 2.5em; margin-bottom: 10px; }
-        @media (max-width: 600px) {
-            .container { max-width: 100vw; padding: 8px; }
-            .card { padding: 16px; border-radius: 12px; }
-            h1 { font-size: 1.5em; }
-        }
         .status { 
             background: rgba(0,255,0,0.2); padding: 15px; 
             border-radius: 10px; margin: 20px 0; font-size: 1.2em;
@@ -233,47 +45,25 @@ def root():
         .btn { background:#111827; color:white; border:1px solid #374151; padding:10px 16px; border-radius:10px; cursor:pointer; }
         .btn.primary { background:#2563eb; border-color:#1d4ed8; }
         .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.75); color: #fff; padding: 10px 14px; border-radius: 8px; font-size: 14px; display:none; }
-
-        /* Chat */
-        .chat { display:flex; gap:16px; }
-        .chat-col { flex:1; min-width: 280px; }
-        .messages { height: 360px; overflow:auto; padding:12px; background: rgba(255,255,255,0.08); border-radius:12px; }
-        .msg { margin: 8px 0; padding: 10px 12px; border-radius: 10px; line-height: 1.4; }
-        .msg.user { background:#2563eb; color:#fff; border-top-right-radius: 4px; }
-        .msg.ai { background:#111827; color:#e5e7eb; border-top-left-radius: 4px; }
-        .msg small { display:block; opacity:0.7; margin-top:6px; font-size: 12px; }
-        .row { display:flex; gap:8px; margin-top:10px; }
-        .row input { flex:1; padding:10px 12px; border-radius:8px; border:1px solid #374151; background:#0b1220; color:#fff; }
-        .row button { padding:10px 14px; border-radius:8px; border:1px solid #374151; background:#2563eb; color:#fff; cursor:pointer; }
-        .hint { font-size: 13px; opacity: 0.85; }
     </style>
-    <link rel="preload" href="/sw.js" as="script" crossorigin>
-    <meta http-equiv="Cache-Control" content="no-store" />
-    <meta http-equiv="Pragma" content="no-cache" />
-    <meta http-equiv="Expires" content="0" />
 </head>
 <body>
     <div class="container">
-        <div class="card" style="text-align:center">
+        <div class="card">
             <h1>🐷 Farm AI Chat</h1>
             <p>Система обліку свиноферми</p>
-            <div class="actions" style="justify-content:center">
+            
+            <div class="status">
+                ✅ ВИПРАВЛЕНО ЧОРНИЙ ЕКРАН!
+            </div>
+            
+            <p>🎉 Тепер працює HTML інтерфейс</p>
+            <p>📱 Відкривається на мобільному</p>
+            <p>🚀 Деплой успішний!</p>
+
+            <div class="actions">
                 <button id="installBtn" class="btn primary" style="display:none">⬇️ Встановити як додаток</button>
                 <button id="refreshBtn" class="btn">🔄 Оновити</button>
-            </div>
-        </div>
-
-        <div class="card">
-            <h3>Чат з AI</h3>
-            <div class="chat">
-                <div class="chat-col">
-                    <div id="messages" class="messages"></div>
-                    <div class="row">
-                        <input id="input" placeholder="Напишіть питання…" />
-                        <button id="send">Надіслати</button>
-                    </div>
-                    <div class="hint">Порада: напишіть "Підсумуй останні 4 тижні" або "Яка виживаність і що покращити?"</div>
-                </div>
             </div>
         </div>
     </div>
@@ -281,6 +71,7 @@ def root():
     <div id="toast" class="toast"></div>
 
     <script>
+        // Показ тоста
         function showToast(msg) {
             const el = document.getElementById('toast');
             el.textContent = msg;
@@ -288,11 +79,15 @@ def root():
             setTimeout(() => el.style.display = 'none', 2500);
         }
 
+        // Реєстрація Service Worker + автооновлення
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', async () => {
                 try {
                     const reg = await navigator.serviceWorker.register('/sw.js');
+                    // Перевірка оновлення на старті
                     reg.update().catch(()=>{});
+
+                    // Якщо з'явився новий SW
                     reg.addEventListener('updatefound', () => {
                         const newWorker = reg.installing;
                         if (newWorker) {
@@ -304,15 +99,20 @@ def root():
                             });
                         }
                     });
+
+                    // Коли новий SW активувався
                     let refreshing = false;
                     navigator.serviceWorker.addEventListener('controllerchange', () => {
                         if (refreshing) return; refreshing = true;
                         window.location.reload();
                     });
-                } catch (e) { console.log('SW error', e); }
+                } catch (e) {
+                    console.log('SW error', e);
+                }
             });
         }
 
+        // beforeinstallprompt (кнопка встановлення)
         let deferredPrompt = null;
         window.addEventListener('beforeinstallprompt', (e) => {
             e.preventDefault();
@@ -328,80 +128,22 @@ def root():
             deferredPrompt = null;
         });
 
+        // Оновити вручну
         document.getElementById('refreshBtn').addEventListener('click', () => window.location.reload());
-
-        // Chat logic
-        const elMsgs = document.getElementById('messages');
-        const elInput = document.getElementById('input');
-        const elSend = document.getElementById('send');
-        const history = JSON.parse(localStorage.getItem('farm_chat_hist')||'[]');
-
-        function render(){
-            elMsgs.innerHTML = history.map(m => `
-                <div class="msg ${m.role}">${m.text.replace(/</g,'&lt;').replace(/\n/g,'<br>')}
-                    <small>${new Date(m.time).toLocaleString()}</small>
-                </div>`).join('');
-            elMsgs.scrollTop = elMsgs.scrollHeight;
-        }
-        render();
-
-        function push(role, text){
-            history.push({role, text, time: Date.now()});
-            if(history.length>50) history.shift();
-            localStorage.setItem('farm_chat_hist', JSON.stringify(history));
-            render();
-        }
-
-        async function send(){
-            const msg = elInput.value.trim();
-            if(!msg) return;
-            elInput.value = '';
-            push('user', msg);
-            const typingId = `typing_${Date.now()}`;
-            elMsgs.insertAdjacentHTML('beforeend', `<div id="${typingId}" class="msg ai">Думаю…</div>`);
-            elMsgs.scrollTop = elMsgs.scrollHeight;
-            try{
-                const res = await fetch('/api/chat', {
-                    method:'POST', headers:{'Content-Type':'application/json'},
-                    body: JSON.stringify({message: msg, include_context: true})
-                });
-                if(!res.ok){
-                    const err = await res.json().catch(()=>({detail: res.statusText}));
-                    throw new Error(err.detail||'Помилка сервера');
-                }
-                const data = await res.json();
-                document.getElementById(typingId)?.remove();
-                push('ai', data.response || 'Немає відповіді');
-            }catch(e){
-                document.getElementById(typingId)?.remove();
-                push('ai', `❌ ${e.message}`);
-            }
-        }
-        elSend.addEventListener('click', send);
-        elInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter') send(); });
     </script>
 </body>
 </html>""")
 
-
-@app.head("/")
-def root_head():
-    """Handle HEAD / to avoid 405 in platform health checks."""
-    return Response(status_code=200)
-
-
 @app.get("/health")
 def health():
-    """Health check with clear status for monitoring and user checks."""
-    return {"status": "online", "message": "Farm AI Backend працює!", "version": app.version}
+    return {"status": "fixed", "html": True}
+
+if __name__ == "__main__":
+    import uvicorn, os
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
 
 
-@app.get("/healthz")
-def healthz():
-    """Alias for platform health checks (Render default: /healthz)."""
-    return {"status": "online", "message": "Farm AI Backend працює!", "version": app.version}
-
-
+# ===================== PWA endpoints =====================
 @app.get("/manifest.json")
 def manifest():
     """PWA manifest (disable cache to ensure fast updates)"""
@@ -428,20 +170,20 @@ def manifest():
 
 @app.get("/offline")
 def offline_page():
-    """Offline fallback page"""
-    return HTMLResponse("""
-    <!DOCTYPE html>
-    <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
-    <title>Farm AI — Offline</title>
-    <style>body{background:#111;color:#eee;font-family:Arial;margin:0;padding:24px} .box{max-width:600px;margin:0 auto;text-align:center;background:#1f2937;padding:24px;border-radius:12px} a{color:#93c5fd}</style>
-    </head><body>
-    <div class='box'>
-      <h2>🔌 Немає інтернету</h2>
-      <p>Додаток встановлено на телефон. Як тільки зʼявиться мережа — дані оновляться автоматично.</p>
-      <p><a href="/">Спробувати знову</a></p>
-    </div>
-    </body></html>
-    """)
+        """Offline fallback page"""
+        return HTMLResponse("""
+        <!DOCTYPE html>
+        <html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>
+        <title>Farm AI — Offline</title>
+        <style>body{background:#111;color:#eee;font-family:Arial;margin:0;padding:24px} .box{max-width:600px;margin:0 auto;text-align:center;background:#1f2937;padding:24px;border-radius:12px} a{color:#93c5fd}</style>
+        </head><body>
+        <div class='box'>
+            <h2>🔌 Немає інтернету</h2>
+            <p>Додаток встановлено на телефон. Як тільки зʼявиться мережа — дані оновляться автоматично.</p>
+            <p><a href="/">Спробувати знову</a></p>
+        </div>
+        </body></html>
+        """)
 
 
 @app.get("/sw.js")
@@ -472,6 +214,7 @@ def service_worker():
             const req = event.request;
             const url = new URL(req.url);
 
+            // Для переходів по сторінках — network-first з offline fallback
             if (req.mode === 'navigate') {
                 event.respondWith(
                     (async () => {
@@ -490,6 +233,7 @@ def service_worker():
                 return;
             }
 
+            // Для статичних ресурсів — stale-while-revalidate
             if (url.origin === location.origin) {
                 event.respondWith(
                     caches.match(req).then(cached => {
@@ -502,81 +246,5 @@ def service_worker():
                 );
             }
         });
-    """
+        """
     return Response(content=sw_code, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
-
-
-# ===================== API: Chat =====================
-class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
-    include_context: Optional[bool] = True
-
-
-@app.post("/api/chat")
-def chat_with_ai(req: ChatRequest, db: Session = Depends(get_db)):
-    if not _ai_model:
-        raise HTTPException(status_code=503, detail="AI недоступний. Перевірте GEMINI_API_KEY")
-
-    # Контекст з БД: останні 8 тижнів + статистика свиноматок
-    recent = []
-    active = 0
-    total = 0
-    if HAS_DB and db is not None:
-        try:
-            recent = db.query(WeeklyRecord).order_by(WeeklyRecord.week_start_date.desc()).limit(8).all()
-            active = db.query(Sow).filter(Sow.status == "активна").count()
-            total = db.query(Sow).count()
-        except Exception:
-            # If any DB error happens, proceed with empty context
-            recent, active, total = [], 0, 0
-
-    context = ""
-    if req.include_context:
-        context = (
-            f"Свиноматки: всього {total}, активних {active}.\n"
-            f"Останні тижні:\n" +
-            "\n".join([
-                f"- {r.week_start_date}: {r.farrowings} опоросів, виживаність {r.survival_rate:.1f}%"
-                for r in recent
-            ])
-        )
-
-    system_prompt = (
-        "Ти — AI асистент для свиноферми. Аналізуй дані та відповідай українською,"
-        " будь конкретним і корисним. Якщо даних бракує — проси уточнення."
-    )
-
-    full_prompt = f"{system_prompt}\n\n{context}\n\nПитання: {req.message}"
-    try:
-        resp = _ai_model.generate_content(full_prompt)
-        text = getattr(resp, 'text', None) or "(порожня відповідь)"
-        return {"response": text}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Помилка AI: {str(e)}")
-
-
-@app.get("/api/ai-status")
-def ai_status():
-    """Проста перевірка стану AI без виклику моделі (безкоштовно)."""
-    status = {
-        "has_package": bool(genai is not None),
-        "has_key": bool(GEMINI_API_KEY),
-        "configured": bool(_ai_model is not None),
-        "model": getattr(_ai_model, "model_name", None) if _ai_model else None,
-    }
-    return status
-
-
-# ===================== Startup: ensure tables =====================
-@app.on_event("startup")
-def _on_startup():
-    try:
-        create_tables()
-    except Exception:
-        # Не блокуємо старт, якщо немає прав/БД — чат без контексту все одно можливий
-        pass
-
-
-if __name__ == "__main__":
-    import uvicorn, os
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
