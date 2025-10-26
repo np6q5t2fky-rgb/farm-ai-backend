@@ -8,7 +8,7 @@ import httpx
 from datetime import datetime, date
 
 # URL Backend API
-API_URL = "http://localhost:8000/api"
+API_URL = "https://farm-ai-chat.fly.dev/api"
 
 
 class FarmState(rx.State):
@@ -26,13 +26,18 @@ class FarmState(rx.State):
     sows: List[Dict] = []
     loading_sows: bool = False
     
-    # Таблиця
-    table_data: List[List] = []
+    # Дані для таблиці Excel
+    table_data: List[Dict] = []
     loading_table: bool = False
-    
-    # Пам'ять
+    # Пам'ять AI
     memory: List[Dict] = []
-    
+    loading_memory: bool = False
+    # Завантаження Excel
+    show_excel_upload: bool = False
+    excel_upload_loading: bool = False
+    # Звіт
+    report_loading: bool = False
+
     # Форми для створення/редагування
     show_weekly_form: bool = False
     show_sow_form: bool = False
@@ -88,18 +93,76 @@ class FarmState(rx.State):
             self.loading_sows = False
     
     async def load_table(self):
-        """Завантаження даних для таблиці"""
+        """Завантажити таблицю Excel"""
         self.loading_table = True
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(f"{API_URL}/table-data")
+                response = await client.get(f"{API_URL}/table")
                 if response.status_code == 200:
                     self.table_data = response.json()
+                else:
+                    self.show_message(f"Помилка: {response.text}", "error")
         except Exception as e:
-            self.show_message(f"Помилка завантаження таблиці: {str(e)}", "error")
+            self.show_message(f"Помилка таблиці: {str(e)}", "error")
         finally:
             self.loading_table = False
-    
+
+    async def load_memory(self):
+        """Завантажити пам'ять AI"""
+        self.loading_memory = True
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{API_URL}/memory")
+                if response.status_code == 200:
+                    self.memory = response.json()
+                else:
+                    self.show_message(f"Помилка: {response.text}", "error")
+        except Exception as e:
+            self.show_message(f"Помилка пам'яті: {str(e)}", "error")
+        finally:
+            self.loading_memory = False
+
+    def open_excel_upload(self):
+        self.show_excel_upload = True
+    def close_excel_upload(self):
+        self.show_excel_upload = False
+
+    async def upload_excel(self, file):
+        """Завантажити Excel файл на сервер"""
+        self.excel_upload_loading = True
+        try:
+            async with httpx.AsyncClient() as client:
+                files = {"file": (file.name, file, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+                response = await client.post(f"{API_URL}/upload-excel", files=files)
+                if response.status_code == 200:
+                    self.show_message("Excel успішно завантажено!", "success")
+                    self.close_excel_upload()
+                    return FarmState.load_table
+                else:
+                    self.show_message(f"Помилка: {response.text}", "error")
+        except Exception as e:
+            self.show_message(f"Помилка завантаження: {str(e)}", "error")
+        finally:
+            self.excel_upload_loading = False
+
+    async def download_report(self):
+        """Завантажити Excel звіт"""
+        self.report_loading = True
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(f"{API_URL}/report")
+                if response.status_code == 200:
+                    # Зберегти файл на пристрій
+                    with open("farm_report.xlsx", "wb") as f:
+                        f.write(response.content)
+                    self.show_message("Звіт збережено!", "success")
+                else:
+                    self.show_message(f"Помилка: {response.text}", "error")
+        except Exception as e:
+            self.show_message(f"Помилка звіту: {str(e)}", "error")
+        finally:
+            self.report_loading = False
+
     def switch_page(self, page: str):
         """Перемикання між сторінками"""
         self.current_page = page
@@ -109,6 +172,10 @@ class FarmState(rx.State):
             return FarmState.load_sows
         elif page == "table":
             return FarmState.load_table
+        elif page == "memory":
+            return FarmState.load_memory
+        elif page == "report":
+            return None
     
     def toggle_chat(self):
         """Показати/сховати чат"""
@@ -636,8 +703,27 @@ def chat_panel() -> rx.Component:
     )
 
 
+# Додати модальне вікно для завантаження Excel
+
+def excel_upload_modal() -> rx.Component:
+    return rx.cond(
+        FarmState.show_excel_upload,
+        rx.modal(
+            rx.vstack(
+                rx.heading("Завантажити Excel файл", size="5"),
+                rx.input(type="file", accept=".xlsx", on_change=FarmState.upload_excel),
+                rx.button("Закрити", on_click=FarmState.close_excel_upload, size="3"),
+                spacing="3",
+            ),
+            is_open=True,
+        ),
+        rx.box(),
+    )
+
+
+# Оновити index для модального вікна
+
 def index() -> rx.Component:
-    """Головна сторінка з вкладками"""
     return rx.box(
         navbar(),
         rx.cond(FarmState.current_page == "weekly", weekly_records_page(),
@@ -650,6 +736,7 @@ def index() -> rx.Component:
             )
         ),
         chat_panel(),
+        excel_upload_modal(),
         width="100%",
         min_height="100vh",
     )
