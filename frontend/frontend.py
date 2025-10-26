@@ -652,7 +652,7 @@ def chat_panel() -> rx.Component:
                                 ),
                             ),
                             padding="0.5em",
-                            align="right" if msg["role"] == "user" else "left",
+                            align=rx.cond(msg["role"] == "user", "right", "left"),
                         ),
                     ),
                     height="300px",
